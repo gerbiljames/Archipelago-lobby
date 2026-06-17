@@ -1,0 +1,25 @@
+# Multi-stage build for the ap-lobby Rust binary.
+# Build stage mirrors taskcluster/docker/rust-builder deps; runtime mirrors
+# taskcluster/docker/ap-lobby (debian:13-slim + libpq5/openssl/ca-certificates).
+FROM rust:1.92-slim-trixie AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq-dev libssl-dev pkg-config liblzma-dev zlib1g-dev \
+        git cmake build-essential ca-certificates mold \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN cargo build --release --bin ap-lobby
+
+FROM debian:13-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libpq5 ca-certificates openssl curl && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/release/ap-lobby /usr/local/bin/ap-lobby
+
+CMD ["/usr/local/bin/ap-lobby"]

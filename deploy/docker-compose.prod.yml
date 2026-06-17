@@ -1,0 +1,121 @@
+# Production lobby stack: validation-on, generation-off.
+# Services: postgres + valkey + ap-lobby + yaml-checker.
+# The ap-lobby container joins the external `proxy` network (the existing
+# SWAG/foundry compose network) so SWAG can reverse-proxy to ap-lobby:8000.
+# Everything else stays on the internal `lobby` network.
+#
+# Secrets come from deploy/.env (see .env on the server). Images are prebuilt
+# locally and loaded onto the host (ap-lobby:prod, ap-worker:prod).
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: aplobby
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [lobby]
+    healthcheck:
+      test: pg_isready -U postgres
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 256m
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey
+    networks: [lobby]
+    healthcheck:
+      test: valkey-cli ping
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 96m
+    restart: unless-stopped
+
+  ap-lobby:
+    image: ap-lobby:prod
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/aplobby
+      VALKEY_URL: redis://valkey:6379?protocol=resp3
+      APWORLDS_INDEX_DIR: /data/apworlds_index
+      APWORLDS_PATH: /data/apworlds_index/worlds
+      APWORLDS_INDEX_REPO_URL: https://github.com/gerbiljames/Archipelago-index.git
+      APWORLDS_INDEX_REPO_BRANCH: main
+      GENERATION_OUTPUT_DIR: /data/gen-output
+      ROCKET_ADDRESS: 0.0.0.0
+      ROCKET_CONFIG: /app/Rocket.toml
+      ROCKET_SECRET_KEY: ${ROCKET_SECRET_KEY}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      YAML_VALIDATION_QUEUE_TOKEN: ${YAML_VALIDATION_QUEUE_TOKEN}
+      # Required at startup even though their workers are disabled.
+      GENERATION_QUEUE_TOKEN: ${GENERATION_QUEUE_TOKEN}
+      OPTIONS_GEN_QUEUE_TOKEN: ${OPTIONS_GEN_QUEUE_TOKEN}
+      RUST_LOG: info
+    volumes:
+      - ./Rocket.toml:/app/Rocket.toml:ro
+      - apworlds:/data/apworlds_index
+      - genoutput:/data/gen-output
+    networks: [lobby, proxy]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+    mem_limit: 256m
+    restart: unless-stopped
+
+  yaml-checker:
+    image: ap-worker:prod
+    working_dir: /ap/archipelago
+    environment:
+      LOBBY_ROOT_URL: http://ap-lobby:8000
+      YAML_VALIDATION_QUEUE_TOKEN: ${YAML_VALIDATION_QUEUE_TOKEN}
+    command: python3 check_wq.py /ap/supported_worlds /ap/index/worlds/
+    volumes:
+      - apworlds:/ap/index
+    networks: [lobby]
+    depends_on:
+      ap-lobby:
+        condition: service_healthy
+    mem_limit: 512m
+    memswap_limit: 1536m
+    restart: unless-stopped
+
+  # Powers the YAML-creation option editor (option definitions). NOT seed
+  # generation — the `generator`/gen_wq.py worker remains intentionally absent.
+  option-generator:
+    image: ap-worker:prod
+    working_dir: /ap/archipelago
+    environment:
+      LOBBY_ROOT_URL: http://ap-lobby:8000
+      OPTIONS_GEN_QUEUE_TOKEN: ${OPTIONS_GEN_QUEUE_TOKEN}
+    command: python3 options_gen_wq.py /ap/supported_worlds /ap/index/worlds/
+    volumes:
+      - apworlds:/ap/index
+    networks: [lobby]
+    depends_on:
+      ap-lobby:
+        condition: service_healthy
+    mem_limit: 512m
+    memswap_limit: 1536m
+    restart: unless-stopped
+
+volumes:
+  pgdata: {}
+  apworlds: {}
+  genoutput: {}
+
+networks:
+  lobby: {}
+  proxy:
+    external: true
+    name: foundry_default
