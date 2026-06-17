@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::error::Error;
@@ -11,7 +12,7 @@ use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use uuid::Uuid;
 use wq::JobId;
 
-use super::RoomId;
+use super::{RoomId, YamlId};
 
 #[derive(PartialEq)]
 pub enum GenerationStatus {
@@ -100,6 +101,61 @@ pub async fn insert_generation_for_room(
         })
         .execute(conn)
         .await?;
+    Ok(())
+}
+
+/// Atomically point a room at an uploaded generation: upsert its generation row,
+/// replace all patch associations, and set the given slot passwords, in one transaction.
+#[tracing::instrument(skip(patch_associations, password_updates, conn))]
+pub async fn publish_generation(
+    room_id: RoomId,
+    job_id: JobId,
+    patch_associations: HashMap<YamlId, String>,
+    password_updates: Vec<(YamlId, String)>,
+    conn: &mut AsyncPgConnection,
+) -> Result<()> {
+    conn.transaction::<(), Error, _>(|conn| {
+        async move {
+            diesel::insert_into(generations::table)
+                .values(NewGeneration {
+                    room_id,
+                    job_id: job_id.into(),
+                    status: GenerationStatus::Done.as_str().to_string(),
+                })
+                .on_conflict(generations::room_id)
+                .do_update()
+                .set((
+                    generations::job_id.eq(Uuid::from(job_id)),
+                    generations::status.eq(GenerationStatus::Done.as_str()),
+                ))
+                .execute(conn)
+                .await?;
+
+            diesel::update(yamls::table.filter(yamls::room_id.eq(room_id)))
+                .set(yamls::patch.eq(Option::<String>::None))
+                .execute(conn)
+                .await?;
+
+            for (yaml_id, patch_path) in &patch_associations {
+                diesel::update(yamls::table.find(yaml_id))
+                    .set(yamls::patch.eq(Some(patch_path)))
+                    .execute(conn)
+                    .await?;
+            }
+
+            for (yaml_id, password) in &password_updates {
+                diesel::update(yamls::table.find(yaml_id))
+                    .set(yamls::password.eq(Some(password)))
+                    .execute(conn)
+                    .await?;
+            }
+
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await?;
+
     Ok(())
 }
 

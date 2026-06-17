@@ -1,15 +1,18 @@
 use std::collections::HashMap;
+use std::io::{Cursor, Read};
 
 use anyhow::anyhow;
 use chrono::{NaiveDateTime, Utc};
 use http::header::CONTENT_DISPOSITION;
 use rocket::{
+    data::{Data, ToByteUnit},
     delete, get,
     http::{Header, Status},
     post, put, routes,
     serde::json::Json,
     State,
 };
+use wq::JobId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -316,6 +319,115 @@ pub(crate) async fn set_password(
     db::update_yaml_password(yaml_id, request.password.clone(), &mut conn).await?;
 
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct SlotPasswordUpload {
+    slot: usize,
+    password: String,
+}
+
+#[derive(Serialize)]
+pub struct UploadGenerationResult {
+    job_id: String,
+    patches_associated: usize,
+    passwords_set: usize,
+}
+
+#[post("/room/<room_id>/upload_generation", data = "<data>")]
+#[tracing::instrument(skip(_session, data, gen_output_dir, ctx))]
+pub(crate) async fn upload_generation(
+    _session: AdminSession,
+    room_id: RoomId,
+    data: Data<'_>,
+    gen_output_dir: &State<GenerationOutDir>,
+    ctx: &State<Context>,
+) -> ApiResult<Json<UploadGenerationResult>> {
+    let mut conn = ctx.db_pool.get().await?;
+
+    db::get_room(room_id, &mut conn)
+        .await
+        .context("Unknown room")
+        .status(Status::NotFound)?;
+
+    let capped = data.open(512.mebibytes()).into_bytes().await?;
+    if !capped.is_complete() {
+        return Err(ApiError {
+            error: anyhow!("Uploaded zip exceeds the size limit"),
+            status: Status::PayloadTooLarge,
+        });
+    }
+    let bytes = capped.into_inner();
+
+    let slot_passwords: Vec<SlotPasswordUpload> = {
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).map_err(|e| ApiError {
+            error: anyhow!("Uploaded file is not a valid zip: {e}"),
+            status: Status::BadRequest,
+        })?;
+        let pw_file = archive
+            .file_names()
+            .find(|n| n.ends_with("_slot_passwords.json"))
+            .map(|s| s.to_string());
+        match pw_file {
+            Some(name) => {
+                let mut contents = String::new();
+                archive.by_name(&name)?.read_to_string(&mut contents)?;
+                serde_json::from_str(&contents).map_err(|e| ApiError {
+                    error: anyhow!("Couldn't parse slot_passwords.json: {e}"),
+                    status: Status::BadRequest,
+                })?
+            }
+            None => Vec::new(),
+        }
+    };
+
+    let previous = db::get_generation_for_room(room_id, &mut conn).await?;
+
+    let job_id = JobId::new();
+    let job_dir = gen_output_dir.0.join(job_id.to_string());
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        std::fs::create_dir_all(&job_dir)?;
+        std::fs::write(job_dir.join("AP_upload.zip"), &bytes)
+    })
+    .await
+    .map_err(|e| anyhow!("Upload write task panicked: {e}"))??;
+
+    let room_yamls: Vec<_> = db::get_yamls_for_room_with_author_names(room_id, &mut conn)
+        .await?
+        .into_iter()
+        .map(|(y, _)| y)
+        .collect();
+
+    let associations =
+        crate::jobs::get_yamls_patches_association(job_id, &gen_output_dir.0, room_yamls.clone())?;
+    let patches_associated = associations.len();
+
+    let slots = get_slots(&room_yamls);
+    let password_updates: Vec<(YamlId, String)> = slot_passwords
+        .iter()
+        .filter_map(|entry| {
+            slots
+                .get(entry.slot.saturating_sub(1))
+                .map(|(_, yaml_id)| (*yaml_id, entry.password.clone()))
+        })
+        .collect();
+    let passwords_set = password_updates.len();
+
+    db::publish_generation(room_id, job_id, associations, password_updates, &mut conn).await?;
+
+    // Best-effort cleanup of the replaced generation's output directory.
+    if let Some(previous) = previous.filter(|p| p.job_id != job_id) {
+        let old_dir = gen_output_dir.0.join(previous.job_id.to_string());
+        if let Err(e) = std::fs::remove_dir_all(&old_dir) {
+            tracing::warn!(error = %e, dir = %old_dir.display(), "Failed to remove replaced generation dir");
+        }
+    }
+
+    Ok(Json(UploadGenerationResult {
+        job_id: job_id.to_string(),
+        patches_associated,
+        passwords_set,
+    }))
 }
 
 #[derive(Serialize)]
@@ -738,6 +850,7 @@ pub fn routes() -> Vec<rocket::Route> {
         refresh_patches,
         slots_passwords,
         set_password,
+        upload_generation,
         list_games,
         game_options,
         edit_yaml,
