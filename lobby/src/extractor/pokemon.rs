@@ -6,6 +6,7 @@ pub struct PokemonEmerald;
 pub struct PokemonCrystal;
 pub struct PokemonFrLg;
 pub struct PokemonBW;
+pub struct Pokepelago;
 
 impl FeatureExtractor for PokemonEmerald {
     fn game(&self) -> &'static str {
@@ -73,6 +74,18 @@ impl FeatureExtractor for PokemonRB {
     fn extract_features(&self, extractor: &mut Extractor) -> Result<()> {
         extractor.register_feature(YamlFeature::TrainerSanity, "trainersanity")?;
         extractor.register_feature(YamlFeature::DexSanity, "dexsanity")?;
+        Ok(())
+    }
+}
+
+impl FeatureExtractor for Pokepelago {
+    fn game(&self) -> &'static str {
+        "Pokepelago"
+    }
+
+    fn extract_features(&self, extractor: &mut Extractor) -> Result<()> {
+        // dexsanity defaults to on in Pokepelago, so a missing key counts as enabled.
+        extractor.register_feature_default_on(YamlFeature::DexSanity, "dexsanity")?;
         Ok(())
     }
 }

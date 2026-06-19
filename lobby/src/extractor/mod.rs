@@ -113,6 +113,23 @@ impl<'a> Extractor<'a> {
         Ok(())
     }
 
+    /// Like `register_feature`, but a missing option counts as enabled — for options
+    /// whose apworld default is on.
+    pub fn register_feature_default_on(&mut self, feature: YamlFeature, path: &str) -> Result<()> {
+        let Some((_, game_yaml, _)) = self.current_game else {
+            panic!("You should call set_game before")
+        };
+
+        let probability = match game_yaml.as_mapping_get(path) {
+            Some(option) => get_option_probability(option, is_trueish)?,
+            None => MAX_WEIGHT,
+        };
+
+        self.add_feature_to_current_game(feature, probability);
+
+        Ok(())
+    }
+
     pub fn get_option_probability(
         &mut self,
         path: &str,
@@ -325,6 +342,7 @@ pub static EXTRACTORS: Lazy<HashMap<&'static str, Box<dyn FeatureExtractor + Sen
         register!(pokemon::PokemonCrystal);
         register!(pokemon::PokemonFrLg);
         register!(pokemon::PokemonBW);
+        register!(pokemon::Pokepelago);
         register!(jd::JakAndDaxter);
         register!(tunic::Tunic);
         register!(kh::KingdomHearts);
@@ -419,6 +437,45 @@ mod tests {
 
             Ok(())
         }
+    }
+
+    #[test]
+    fn test_default_on_absent_key() -> Result<()> {
+        let raw_yaml = r#"
+Test:
+  other_option: false
+        "#;
+        let yaml: Value = Value::load_from_str(raw_yaml)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("No YAML document"))?;
+        let mut extractor = Extractor::new(&yaml)?;
+        extractor.set_game("Test", 10000)?;
+        extractor.register_feature_default_on(YamlFeature::DexSanity, "dexsanity")?;
+
+        let expected = HashMap::from([(YamlFeature::DexSanity, 10000)]);
+        assert_eq!(extractor.finalize(), expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_on_explicit_false() -> Result<()> {
+        let raw_yaml = r#"
+Test:
+  dexsanity: false
+        "#;
+        let yaml: Value = Value::load_from_str(raw_yaml)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("No YAML document"))?;
+        let mut extractor = Extractor::new(&yaml)?;
+        extractor.set_game("Test", 10000)?;
+        extractor.register_feature_default_on(YamlFeature::DexSanity, "dexsanity")?;
+
+        assert_eq!(extractor.finalize(), HashMap::new());
+
+        Ok(())
     }
 
     #[test]
