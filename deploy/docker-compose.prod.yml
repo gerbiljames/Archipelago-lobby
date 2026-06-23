@@ -1,8 +1,8 @@
 # Production lobby stack: validation-on, generation-off.
 # Services: postgres + valkey + ap-lobby + yaml-checker.
-# The ap-lobby container joins the external `proxy` network (the existing
-# SWAG/foundry compose network) so SWAG can reverse-proxy to ap-lobby:8000.
-# Everything else stays on the internal `lobby` network.
+# ap-lobby publishes to 127.0.0.1:8001 on the host; the host's system nginx
+# reverse-proxies ap-lobby.fightme.pro to it (see deploy/nginx/). Everything
+# stays on the internal `lobby` network.
 #
 # Secrets come from deploy/.env (see .env on the server). Images are prebuilt
 # locally and loaded onto the host (ap-lobby:prod, ap-worker:prod).
@@ -58,7 +58,9 @@ services:
       - ./Rocket.toml:/app/Rocket.toml:ro
       - apworlds:/data/apworlds_index
       - genoutput:/data/gen-output
-    networks: [lobby, proxy]
+    ports:
+      - "127.0.0.1:8001:8000"
+    networks: [lobby]
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,6 +118,3 @@ volumes:
 
 networks:
   lobby: {}
-  proxy:
-    external: true
-    name: foundry_default
