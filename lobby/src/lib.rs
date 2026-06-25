@@ -195,6 +195,14 @@ pub async fn main() -> crate::error::Result<()> {
     let redis_cfg = Config::from_url(&valkey_url);
     let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1))?;
 
+    // Single shared HTTP client. A reqwest::Client owns a connection pool and is
+    // meant to be reused; the timeout ensures a hung upstream (e.g. Discord)
+    // can't leave a request — and its socket — open forever.
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("Failed to build HTTP client");
+
     let limits = Limits::default()
         .limit("string", 2.megabytes())
         .limit("form", 256.kilobytes())
@@ -290,6 +298,7 @@ pub async fn main() -> crate::error::Result<()> {
         .mount("/queues", views::queues::routes())
         .register("/", catchers![unauthorized, unprocessable_entity])
         .manage(ctx)
+        .manage(http_client)
         .manage(discord_config)
         .manage(figment)
         .manage(admin_token)

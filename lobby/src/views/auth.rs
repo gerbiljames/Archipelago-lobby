@@ -50,12 +50,13 @@ async fn login_discord_callback(
     cookies: &CookieJar<'_>,
     config: &State<DiscordConfig>,
     ctx: &State<Context>,
+    http_client: &State<reqwest::Client>,
 ) -> Result<Redirect> {
     let token = token.access_token();
 
-    let client = reqwest::Client::new();
-    let user = get_discord_user(&client, token).await?;
+    let user = get_discord_user(http_client.inner(), token).await?;
 
+    let client = http_client.inner().clone();
     let client_id = config.client_id.clone();
     let client_secret = config.client_secret.clone();
     let token = token.to_owned();
