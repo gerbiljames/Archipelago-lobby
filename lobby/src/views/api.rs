@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 
 use anyhow::anyhow;
 use chrono::{NaiveDateTime, Utc};
 use http::header::CONTENT_DISPOSITION;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use rocket::{
     data::{Data, ToByteUnit},
     delete, get,
@@ -72,13 +74,90 @@ pub struct RoomInfo {
     yamls: Vec<YamlInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     server_info: Option<RoomServerInfo>,
+    /// Omitted unless the caller may see it (admin token, the room's author, or a user with a YAML
+    /// in the room), and omitted when the organizer hasn't set one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    room_url: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct RoomListEntry {
+    id: RoomId,
+    name: String,
+    description: String,
+    close_date: i64,
+    locked: bool,
+    author_id: i64,
+    hashtags: Vec<String>,
+    room_url: String,
+}
+
+#[derive(Serialize)]
+pub struct RoomListResponse {
+    rooms: Vec<RoomListEntry>,
+}
+
+fn extract_hashtags(text: &str) -> Vec<String> {
+    static RE_HASHTAG: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?:^|[^A-Za-z0-9/])#(\w+)").unwrap());
+
+    let mut seen = HashSet::new();
+    RE_HASHTAG
+        .captures_iter(text)
+        .map(|captures| captures[1].to_lowercase())
+        .filter(|tag| seen.insert(tag.clone()))
+        .collect()
+}
+
+/// Upper bound on `?closed_within=`, in seconds. Client-supplied, so bound it: nobody should be
+/// able to ask for the whole room history through this endpoint.
+const MAX_CLOSED_WITHIN: u32 = 7 * 24 * 60 * 60;
+
+/// Lists open rooms, and — with `?closed_within=<seconds>` — rooms that closed within that window.
+/// The window is clamped to [`MAX_CLOSED_WITHIN`]; omitted or `0` means open rooms only.
+#[get("/rooms?<closed_within>")]
+#[tracing::instrument(skip(_session, ctx))]
+pub(crate) async fn list_open_rooms(
+    _session: AdminSession,
+    closed_within: Option<u32>,
+    ctx: &State<Context>,
+) -> ApiResult<Json<RoomListResponse>> {
+    let mut conn = ctx.db_pool.get().await?;
+
+    let open_state = match closed_within.unwrap_or(0).min(MAX_CLOSED_WITHIN) {
+        0 => db::OpenState::Open,
+        secs => db::OpenState::OpenOrClosedWithin(secs.into()),
+    };
+
+    let (rooms, _) = db::list_rooms(
+        db::RoomFilter::default().with_open_state(open_state),
+        None,
+        &mut conn,
+    )
+    .await?;
+
+    let rooms = rooms
+        .into_iter()
+        .map(|room| RoomListEntry {
+            id: room.id,
+            name: room.settings.name,
+            hashtags: extract_hashtags(&room.settings.description),
+            description: room.settings.description,
+            close_date: room.settings.close_date.and_utc().timestamp(),
+            locked: room.settings.locked,
+            author_id: room.settings.author_id,
+            room_url: room.settings.room_url,
+        })
+        .collect();
+
+    Ok(Json(RoomListResponse { rooms }))
 }
 
 #[get("/room/<room_id>")]
-#[tracing::instrument(skip(_session, ctx))]
+#[tracing::instrument(skip(session, ctx))]
 pub(crate) async fn room_info(
     room_id: RoomId,
-    _session: LoggedInSession,
+    session: LoggedInSession,
     ctx: &State<Context>,
 ) -> ApiResult<Json<RoomInfo>> {
     let mut conn = ctx.db_pool.get().await?;
@@ -96,6 +175,15 @@ pub(crate) async fn room_info(
         .enumerate()
         .map(|(index, (_, id))| (*id, index))
         .collect();
+
+    // Same rule as the room page (`views/room/main.rs`): the room URL is visible to an admin (which
+    // includes an `X-Api-Key` caller), to the room's author, and to anyone with a YAML in the room.
+    // An admin-token session has no `user_id`, so don't go through `session.user_id()` here.
+    let is_my_room = session.0.is_admin || session.0.user_id == Some(room.settings.author_id);
+    let user_has_yaml = yamls
+        .iter()
+        .any(|(yaml, _)| Some(yaml.owner_id) == session.0.user_id);
+    let can_see_room_url = is_my_room || user_has_yaml;
 
     Ok(Json(RoomInfo {
         id: room.id,
@@ -121,6 +209,7 @@ pub(crate) async fn room_info(
             host: info.host,
             port: info.port,
         }),
+        room_url: Some(room.settings.room_url).filter(|url| can_see_room_url && !url.is_empty()),
     }))
 }
 
@@ -846,6 +935,7 @@ pub fn routes() -> Vec<rocket::Route> {
         retry_yaml,
         yaml_info,
         room_info,
+        list_open_rooms,
         bulk_yamls,
         refresh_patches,
         slots_passwords,
@@ -857,4 +947,38 @@ pub fn routes() -> Vec<rocket::Route> {
         delete_yaml_api,
         change_yaml_owner,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_hashtags;
+
+    #[test]
+    fn test_extract_hashtags() {
+        assert_eq!(
+            extract_hashtags("sign up here #mclabsync #weekly"),
+            vec!["mclabsync", "weekly"]
+        );
+        assert_eq!(
+            extract_hashtags("#MCLabSync and #mclabsync"),
+            vec!["mclabsync"]
+        );
+        assert_eq!(extract_hashtags("no tags here"), Vec::<String>::new());
+        assert_eq!(extract_hashtags(""), Vec::<String>::new());
+        assert_eq!(extract_hashtags("#b comes #a first"), vec!["b", "a"]);
+        assert_eq!(
+            extract_hashtags("see https://example.com/#faq for info"),
+            Vec::<String>::new()
+        );
+        assert_eq!(extract_hashtags("mid#word"), Vec::<String>::new());
+        assert_eq!(extract_hashtags("#start of string"), vec!["start"]);
+        assert_eq!(
+            extract_hashtags("tab\t#tag and\n#newline"),
+            vec!["tag", "newline"]
+        );
+        assert_eq!(
+            extract_hashtags("(#parens) and text.#dot"),
+            vec!["parens", "dot"]
+        );
+    }
 }
