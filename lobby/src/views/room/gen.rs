@@ -9,6 +9,7 @@ use crate::{
         YamlValidationStatus,
     },
     error::{ApiResult, RedirectTo},
+    gen_upload::{ingest_generation_upload, GenerationUploadForm},
     generation::get_generation_info,
     index_manager::IndexManager,
     jobs::{GenerationOutDir, GenerationParams, GenerationQueue},
@@ -21,7 +22,7 @@ use diesel_async::AsyncPgConnection;
 use http::header::CONTENT_DISPOSITION;
 use itertools::Itertools;
 use rocket::tokio::fs::File;
-use rocket::{fs::NamedFile, http::Header, State};
+use rocket::{form::Form, fs::NamedFile, http::Header, State};
 use rocket::{
     futures::stream::Stream,
     response::{stream::ByteStream, Redirect},
@@ -52,9 +53,7 @@ async fn gen_room(
 ) -> Result<GenRoomTpl<'_>> {
     let mut conn = ctx.db_pool.get().await?;
     let room = db::get_room(room_id, &mut conn).await?;
-    let is_my_room = session.0.is_admin || session.user_id() == room.settings.author_id;
-
-    if !is_my_room {
+    if !session.can_manage_room(&room) {
         Err(anyhow::anyhow!(
             "Cannot access generation for a room that isn't yours"
         ))?
@@ -82,9 +81,7 @@ async fn gen_room_status<'a>(
     let mut conn = ctx.db_pool.get().await?;
 
     let room = db::get_room(room_id, &mut conn).await?;
-    let is_my_room = session.0.is_admin || session.user_id() == room.settings.author_id;
-
-    if !is_my_room {
+    if !session.can_manage_room(&room) {
         Err(anyhow::anyhow!(
             "Cannot cancel generation for a room that isn't yours"
         ))?
@@ -154,9 +151,7 @@ async fn gen_room_start(
     let mut conn = ctx.db_pool.get().await?;
 
     let room = db::get_room(room_id, &mut conn).await?;
-    let is_my_room = session.0.is_admin || session.user_id() == room.settings.author_id;
-
-    if !is_my_room {
+    if !session.can_manage_room(&room) {
         Err(anyhow::anyhow!(
             "Cannot access generation for a room that isn't yours"
         ))?
@@ -178,6 +173,39 @@ async fn gen_room_start(
     Ok(Redirect::to(rocket::uri!(gen_room(room_id))))
 }
 
+#[rocket::post("/room/<room_id>/generation/upload", data = "<form>")]
+#[tracing::instrument(skip(session, redirect_to, form, generation_out_dir, ctx))]
+async fn gen_room_upload(
+    room_id: RoomId,
+    form: Form<GenerationUploadForm<'_>>,
+    session: LoggedInSession,
+    redirect_to: &RedirectTo,
+    generation_out_dir: &State<GenerationOutDir>,
+    ctx: &State<Context>,
+) -> Result<Redirect> {
+    redirect_to.set(&format!("/room/{room_id}/generation"));
+
+    let mut conn = ctx.db_pool.get().await?;
+
+    let room = db::get_room(room_id, &mut conn).await?;
+    if !session.can_manage_room(&room) {
+        Err(anyhow::anyhow!(
+            "Cannot upload a generation for a room that isn't yours"
+        ))?
+    }
+    if !room.is_closed() && !session.0.is_admin {
+        Err(anyhow::anyhow!(
+            "The room must be closed before uploading a generation"
+        ))?
+    }
+
+    ingest_generation_upload(room_id, form.into_inner(), &generation_out_dir.0, &mut conn)
+        .await
+        .map_err(|e| e.error)?;
+
+    Ok(Redirect::to(rocket::uri!(gen_room(room_id))))
+}
+
 #[rocket::get("/room/<room_id>/generation/cancel")]
 #[tracing::instrument(skip(session, redirect_to, gen_queue, ctx))]
 async fn gen_room_cancel(
@@ -192,9 +220,7 @@ async fn gen_room_cancel(
     let mut conn = ctx.db_pool.get().await?;
 
     let room = db::get_room(room_id, &mut conn).await?;
-    let is_my_room = session.0.is_admin || session.user_id() == room.settings.author_id;
-
-    if !is_my_room {
+    if !session.can_manage_room(&room) {
         Err(anyhow::anyhow!(
             "Cannot cancel generation for a room that isn't yours"
         ))?
@@ -222,9 +248,7 @@ async fn gen_room_logs<'a>(
 ) -> Result<RenamedFile<'a>> {
     let mut conn = ctx.db_pool.get().await?;
     let room = db::get_room(room_id, &mut conn).await?;
-    let is_my_room = session.0.is_admin || session.user_id() == room.settings.author_id;
-
-    if !is_my_room {
+    if !session.can_manage_room(&room) {
         Err(anyhow::anyhow!(
             "Cannot view logs for a generation that's not yours"
         ))?
@@ -265,9 +289,7 @@ async fn gen_room_logs_stream<'a>(
     let mut conn = ctx.db_pool.get().await?;
 
     let room = db::get_room(room_id, &mut conn).await?;
-    let is_my_room = session.0.is_admin || session.user_id() == room.settings.author_id;
-
-    if !is_my_room {
+    if !session.can_manage_room(&room) {
         Err(anyhow::anyhow!(
             "Cannot view logs for a generation that's not yours"
         ))?
@@ -286,6 +308,9 @@ async fn gen_room_logs_stream<'a>(
                 continue;
             };
             let Some(output_path) = generation_info.log_file else {
+                if matches!(gen.status, GenerationStatus::Done | GenerationStatus::Failed) {
+                    return;
+                }
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             };
@@ -338,9 +363,7 @@ async fn gen_room_output<'a>(
 ) -> ApiResult<RenamedFile<'a>> {
     let mut conn = ctx.db_pool.get().await?;
     let room = db::get_room(room_id, &mut conn).await?;
-    let is_my_room = session.0.is_admin || session.user_id() == room.settings.author_id;
-
-    if !is_my_room {
+    if !session.can_manage_room(&room) {
         Err(anyhow::anyhow!(
             "Cannot get output for a generation that's not yours"
         ))?
@@ -474,6 +497,7 @@ pub fn routes() -> Vec<rocket::Route> {
     rocket::routes![
         gen_room,
         gen_room_start,
+        gen_room_upload,
         gen_room_cancel,
         gen_room_logs,
         gen_room_logs_stream,

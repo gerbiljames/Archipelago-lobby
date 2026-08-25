@@ -41,6 +41,10 @@
     </a>
     <a href="/room/{{ self.room.id }}/generation/output" style="display: none" class="button-emulator validation-button" id="gen-output-button">Download generation output</a>
     <p style="display: none; margin-top: 1em" id="ap-upload-hint">Next step: <a href="https://archipelago.gg/uploads" target="_blank">Upload to Archipelago.gg</a></p>
+
+    {% if current_gen.status == GenerationStatus::Done || current_gen.status == GenerationStatus::Failed %}
+        {% call upload_form("Replace with an uploaded generation") %}{% endcall %}
+    {% endif %}
 {% else %}
     {% let is_ok_for_gen = self.generation_checklist.values().min().copied().unwrap_or_default() %}
 
@@ -63,9 +67,44 @@
     {% else %}
         <a class='button-emulator cancel-button not-clickable'>Start generation</a>
     {% endif %}
+
+    {% call upload_form("Upload a generation") %}{% endcall %}
 {% endif %}
 
 {% endblock %}
+
+{% macro upload_form(title) %}
+    <form action="/room/{{ self.room.id }}/generation/upload" method="POST" enctype="multipart/form-data" id="gen-upload-form" style="margin-top: 2em">
+        <table class="styled">
+            <thead>
+                <tr><th colspan=2>{{ title }}</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan=2>
+                        Generate the seed yourself from the individual YAMLs of this room (the "Download all YAMLs" download, not the bundled one, so that slots are numbered the same way), then upload the <code>AP_&lt;seed&gt;.zip</code> it produces.
+                        If per-slot passwords were enabled, also upload the <code>AP_&lt;seed&gt;_slot_passwords.json</code> written next to it.
+                        The upload is checked against this room's slots (player names and games) before it's accepted.
+                    </td>
+                </tr>
+                <tr>
+                    <td class="shrink"><label class="unstyled" for="gen-upload-seed">Seed zip</label></td>
+                    <td><input type="file" name="seed" id="gen-upload-seed" accept=".zip,application/zip" required></td>
+                </tr>
+                <tr>
+                    <td class="shrink"><label class="unstyled" for="gen-upload-passwords">Slot passwords</label></td>
+                    <td><input type="file" name="passwords" id="gen-upload-passwords" accept=".json,application/json"></td>
+                </tr>
+            </tbody>
+        </table>
+        {% if self.room.is_closed() || base.is_admin %}
+            <button type="submit" class="button-emulator validation-button" id="gen-upload-button">Upload generation</button>
+        {% else %}
+            <a class="button-emulator cancel-button not-clickable" title="The room must be closed before uploading a generation">Upload generation</a>
+            <p>The room must be closed before a generation can be uploaded.</p>
+        {% endif %}
+    </form>
+{% endmacro %}
 
 {% block scripts %}
 <script>

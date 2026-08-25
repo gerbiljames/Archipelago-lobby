@@ -12,8 +12,6 @@ use anyhow::{Context, Result};
 use diesel_async::pooled_connection::deadpool::Pool;
 use diesel_async::AsyncPgConnection;
 use indexmap::IndexMap;
-use once_cell::sync::Lazy;
-use regex::Regex;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +21,7 @@ use wq::{JobDesc, JobId, JobResult, JobStatus, WorkQueue};
 
 use crate::{
     db::{self, GenerationStatus, RoomId, YamlId, YamlValidationStatus, YamlWithoutContent},
+    gen_upload::slot_outputs,
     generation::{get_generation_info, get_slots},
 };
 
@@ -351,9 +350,6 @@ pub fn get_generation_callback(
     Arc::pin(callback)
 }
 
-static AP_PATCH_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new("AP[_-][0-9]+[_-]P([0-9]+)[_-](.*)\\..*").unwrap());
-
 #[tracing::instrument(skip(conn))]
 pub async fn refresh_gen_patches(
     room_id: RoomId,
@@ -392,19 +388,19 @@ pub fn get_yamls_patches_association(
             .context("Couldn't find generation output")?,
     );
     let reader = BufReader::new(File::open(gen_file)?);
-    let zip = zip::ZipArchive::new(reader)?;
+    let mut zip = zip::ZipArchive::new(reader)?;
 
     let room_yamls_with_resolved_names = get_slots(&room_yamls);
 
     let mut association = HashMap::new();
-    for file_name in zip.file_names() {
-        if let Some(patch) = AP_PATCH_RE.captures(file_name) {
-            let slot_number: usize = patch[1].parse()?;
-            let Some(associated_yaml) = room_yamls_with_resolved_names.get(slot_number - 1) else {
-                continue;
-            };
-            association.insert(associated_yaml.1, file_name.to_string());
-        }
+    for (slot_number, file_name) in slot_outputs(&mut zip) {
+        let Some(associated_yaml) = slot_number
+            .checked_sub(1)
+            .and_then(|i| room_yamls_with_resolved_names.get(i))
+        else {
+            continue;
+        };
+        association.insert(associated_yaml.1, file_name);
     }
 
     Ok(association)

@@ -40,6 +40,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod extractor;
+pub mod gen_upload;
 pub mod generation;
 pub mod index_manager;
 pub mod instrumentation;
@@ -106,10 +107,43 @@ async fn unauthorized<'r>(req: &'r Request<'r>) -> crate::error::Result<Redirect
     )))
 }
 
+/// The local path of the page the request came from, so a failed form submission
+/// can land back on it. Only the path is kept to avoid redirecting off-site.
+fn referer_path(req: &Request<'_>) -> String {
+    req.headers()
+        .get_one("Referer")
+        .and_then(|referer| rocket::http::uri::Absolute::parse(referer).ok())
+        .map(|uri| match uri.query() {
+            Some(query) => format!("{}?{}", uri.path(), query),
+            None => uri.path().to_string(),
+        })
+        .filter(|path| path.starts_with('/'))
+        .unwrap_or_else(|| "/".to_string())
+}
+
+#[catch(413)]
+async fn payload_too_large<'r>(req: &'r Request<'r>) -> crate::error::Result<Redirect> {
+    let ctx = req.rocket().state::<Context>().unwrap();
+    let session = Session::from_request_sync(req);
+
+    session
+        .push_error("The uploaded file is too large", ctx)
+        .await?;
+
+    Ok(Redirect::to(referer_path(req)))
+}
+
 #[catch(422)]
 async fn unprocessable_entity<'r>(req: &'r Request<'r>) -> crate::error::Result<Redirect> {
     let ctx = req.rocket().state::<Context>().unwrap();
     let session = Session::from_request_sync(req);
+
+    if req.method() == Method::Post {
+        session
+            .push_error("The submitted form was invalid or incomplete", ctx)
+            .await?;
+        return Ok(Redirect::to(referer_path(req)));
+    }
 
     session
         .push_error("Invalid URL: the resource identifier is malformed", ctx)
@@ -206,7 +240,9 @@ pub async fn main() -> crate::error::Result<()> {
     let limits = Limits::default()
         .limit("string", 2.megabytes())
         .limit("form", 256.kilobytes())
-        .limit("json", 10.megabytes());
+        .limit("json", 10.megabytes())
+        .limit("file", 512.mebibytes())
+        .limit("data-form", 520.mebibytes());
     let shutdown_config = ShutdownConfig {
         grace: 0,
         mercy: 0,
@@ -296,7 +332,10 @@ pub async fn main() -> crate::error::Result<()> {
             MetricsRoute(prometheus, queue_counters, room_counters),
         )
         .mount("/queues", views::queues::routes())
-        .register("/", catchers![unauthorized, unprocessable_entity])
+        .register(
+            "/",
+            catchers![unauthorized, unprocessable_entity, payload_too_large],
+        )
         .manage(ctx)
         .manage(http_client)
         .manage(discord_config)
