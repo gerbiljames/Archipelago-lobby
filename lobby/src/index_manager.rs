@@ -132,9 +132,16 @@ impl IndexManager {
 fn clone_or_update(repo_url: &str, repo_branch: &str, path: &Path) -> Result<()> {
     let repo = Repository::init(path)?;
 
-    let mut remote = repo
-        .find_remote("origin")
-        .or_else(|_| repo.remote("origin", repo_url))?;
+    match repo.find_remote("origin") {
+        Ok(remote) if remote.url() != Some(repo_url) => {
+            repo.remote_set_url("origin", repo_url)?;
+        }
+        Ok(_) => {}
+        Err(_) => {
+            repo.remote("origin", repo_url)?;
+        }
+    }
+    let mut remote = repo.find_remote("origin")?;
 
     remote.fetch(&[repo_branch], None, None)?;
     let fetch_head = repo.find_reference("FETCH_HEAD")?;

@@ -42,7 +42,7 @@ services:
       VALKEY_URL: redis://valkey:6379?protocol=resp3
       APWORLDS_INDEX_DIR: /data/apworlds_index
       APWORLDS_PATH: /data/apworlds_index/worlds
-      APWORLDS_INDEX_REPO_URL: https://github.com/gerbiljames/Archipelago-index.git
+      APWORLDS_INDEX_REPO_URL: https://github.com/ionium-ap/Archipelago-index.git
       APWORLDS_INDEX_REPO_BRANCH: main
       GENERATION_OUTPUT_DIR: /data/gen-output
       ROCKET_ADDRESS: 0.0.0.0
