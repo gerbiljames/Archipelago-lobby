@@ -79,6 +79,9 @@ pub struct ValidatedGeneration {
     pub patches: HashMap<YamlId, String>,
     /// `None` when no passwords file was supplied: existing passwords are left untouched.
     pub passwords: Option<Vec<(YamlId, String)>>,
+    /// Mismatches that don't block the upload, e.g. a player whose YAML
+    /// triggers rename them at generation time.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -171,6 +174,7 @@ pub fn validate_generation<R: Read + Seek>(
     expected: &[ExpectedSlot],
 ) -> Result<ValidatedGeneration, GenerationMismatch> {
     let mut errors = Vec::new();
+    let mut warnings = Vec::new();
     let names: Vec<String> = archive
         .file_names()
         .filter(|name| !name.ends_with('/'))
@@ -254,7 +258,7 @@ pub fn validate_generation<R: Read + Seek>(
             }
             if let Some(player_name) = &manifest.player_name {
                 if player_name != &exp.name {
-                    errors.push(format!(
+                    warnings.push(format!(
                         "{name} is for player {player_name:?} but slot {slot} in this room is {:?}",
                         exp.name
                     ));
@@ -269,7 +273,7 @@ pub fn validate_generation<R: Read + Seek>(
                 }
             }
         } else if !caps[3].starts_with(&file_safe_name(&exp.name)) {
-            errors.push(format!(
+            warnings.push(format!(
                 "{name} doesn't look like an output for slot {slot} ({}) in this room",
                 exp.name
             ));
@@ -301,11 +305,10 @@ pub fn validate_generation<R: Read + Seek>(
                 continue;
             }
             if entry.name != exp.name {
-                errors.push(format!(
+                warnings.push(format!(
                     "The passwords file says slot {} is {:?} but slot {} in this room is {:?}",
                     entry.slot, entry.name, exp.slot, exp.name
                 ));
-                continue;
             }
             password_updates.push((exp.yaml_id, entry.password.clone()));
         }
@@ -330,6 +333,7 @@ pub fn validate_generation<R: Read + Seek>(
         seed_name: seed_name.unwrap_or_default(),
         patches,
         passwords: password_updates,
+        warnings,
     })
 }
 
@@ -339,6 +343,7 @@ pub struct UploadGenerationResult {
     pub seed_name: String,
     pub patches_associated: usize,
     pub passwords_set: usize,
+    pub warnings: Vec<String>,
 }
 
 /// Older generators wrote the slot passwords inside the zip rather than next to it.
@@ -375,6 +380,13 @@ async fn remove_upload_dir(job_dir: &Path) {
 /// What the generation page shows in place of a worker's log.
 fn upload_log(validated: &ValidatedGeneration, expected: &[ExpectedSlot]) -> String {
     let mut log = format!("Uploaded generation for seed {}\n\n", validated.seed_name);
+    if !validated.warnings.is_empty() {
+        log.push_str("Warnings:\n");
+        for warning in &validated.warnings {
+            log.push_str(&format!("  {warning}\n"));
+        }
+        log.push('\n');
+    }
     for exp in expected {
         let patch = validated
             .patches
@@ -525,6 +537,7 @@ pub async fn ingest_generation_upload(
         seed_name: validated.seed_name,
         patches_associated,
         passwords_set,
+        warnings: validated.warnings,
     })
 }
 
@@ -666,13 +679,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_player_names() {
+    fn warns_about_wrong_player_names() {
         let expected = vec![slot(1, "Alice", "Game A"), slot(2, "Robert", "Game B")];
-        let errors = errors_of(validate_generation(&mut good_seed(), None, &expected));
-        assert_eq!(errors.len(), 1, "{errors:?}");
+        let validated = validate_generation(&mut good_seed(), None, &expected).unwrap();
+        assert_eq!(validated.patches.len(), 2);
+        assert_eq!(validated.warnings.len(), 1, "{:?}", validated.warnings);
         assert!(
-            errors[0].contains("\"Bob\"") && errors[0].contains("\"Robert\""),
-            "{errors:?}"
+            validated.warnings[0].contains("\"Bob\"")
+                && validated.warnings[0].contains("\"Robert\""),
+            "{:?}",
+            validated.warnings
         );
     }
 
@@ -731,9 +747,39 @@ mod tests {
             Some(&passwords),
             &room(),
         ));
-        assert!(errors.iter().any(|e| e.contains("\"Eve\"")), "{errors:?}");
         assert!(errors.iter().any(|e| e.contains("slot 3")), "{errors:?}");
-        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn warns_about_password_names_but_still_sets_them() {
+        let passwords = [
+            SlotPassword {
+                slot: 1,
+                name: "Alice".into(),
+                password: "aaaa".into(),
+            },
+            SlotPassword {
+                slot: 2,
+                name: "Eve".into(),
+                password: "eeee".into(),
+            },
+        ];
+        let expected = room();
+        let validated = validate_generation(&mut good_seed(), Some(&passwords), &expected).unwrap();
+        assert_eq!(validated.warnings.len(), 1, "{:?}", validated.warnings);
+        assert!(
+            validated.warnings[0].contains("\"Eve\"") && validated.warnings[0].contains("\"Bob\""),
+            "{:?}",
+            validated.warnings
+        );
+        assert_eq!(
+            validated.passwords,
+            Some(vec![
+                (expected[0].yaml_id, "aaaa".to_string()),
+                (expected[1].yaml_id, "eeee".to_string())
+            ])
+        );
     }
 
     #[test]
@@ -763,9 +809,14 @@ mod tests {
             ("AP_123_P2_Bob.bin", b"raw"),
         ]);
         let expected = vec![slot(1, "Alice", "Game A"), slot(2, "Robert", "Game B")];
-        let errors = errors_of(validate_generation(&mut zip, None, &expected));
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("AP_123_P2_Bob.bin"), "{errors:?}");
+        let validated = validate_generation(&mut zip, None, &expected).unwrap();
+        assert_eq!(validated.patches.len(), 2);
+        assert_eq!(validated.warnings.len(), 1, "{:?}", validated.warnings);
+        assert!(
+            validated.warnings[0].contains("AP_123_P2_Bob.bin"),
+            "{:?}",
+            validated.warnings
+        );
     }
 
     #[test]

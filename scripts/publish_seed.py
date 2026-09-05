@@ -107,6 +107,8 @@ def upload(args):
     print(f"  seed {result['seed_name']}, generation {result['job_id']}")
     print(f"  {result['patches_associated']} patches associated, "
           f"{result['passwords_set']} passwords set")
+    for warning in result.get("warnings", []):
+        print(f"  ~ {warning}")
 
 
 def passwords_only(args):

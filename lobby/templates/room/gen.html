@@ -84,7 +84,7 @@
                     <td colspan=2>
                         Generate the seed yourself from the individual YAMLs of this room (the "Download all YAMLs" download, not the bundled one, so that slots are numbered the same way), then upload the <code>AP_&lt;seed&gt;.zip</code> it produces.
                         If per-slot passwords were enabled, also upload the <code>AP_&lt;seed&gt;_slot_passwords.json</code> written next to it.
-                        The upload is checked against this room's slots (player names and games) before it's accepted.
+                        The upload is checked against this room's slots before it's accepted; player names that differ (for example because a YAML renames its player with a trigger) are reported as warnings.
                     </td>
                 </tr>
                 <tr>

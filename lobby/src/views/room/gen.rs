@@ -199,9 +199,18 @@ async fn gen_room_upload(
         ))?
     }
 
-    ingest_generation_upload(room_id, form.into_inner(), &generation_out_dir.0, &mut conn)
-        .await
-        .map_err(|e| e.error)?;
+    let result =
+        ingest_generation_upload(room_id, form.into_inner(), &generation_out_dir.0, &mut conn)
+            .await
+            .map_err(|e| e.error)?;
+
+    if !result.warnings.is_empty() {
+        let msg = format!(
+            "The generation was uploaded but some slots don't match the room's YAMLs:\n{}",
+            result.warnings.join("\n")
+        );
+        session.0.push_warning(&msg, ctx).await?;
+    }
 
     Ok(Redirect::to(rocket::uri!(gen_room(room_id))))
 }
