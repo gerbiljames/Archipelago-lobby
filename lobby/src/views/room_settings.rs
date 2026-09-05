@@ -1,7 +1,9 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use crate::db::{self, NewRoom, Room, RoomId, RoomSettings, RoomTemplate, RoomTemplateId};
+use crate::db::{
+    self, NewRoom, Room, RoomId, RoomInfo, RoomSettings, RoomTemplate, RoomTemplateId,
+};
 use crate::error::Result;
 use anyhow::anyhow;
 use apwm::{Index, Manifest};
@@ -40,9 +42,19 @@ pub struct RoomSettingsForm<'a> {
     pub meta_file: String,
     pub is_bundle_room: bool,
     pub locked: bool,
+    pub server_host: Option<&'a str>,
+    pub server_port: Option<&'a str>,
 }
 
 impl<'a> RoomSettingsForm<'a> {
+    /// The AP server address to store as the room's info, `None` to clear it.
+    /// Only valid after `validate_room_form`.
+    pub fn server_info(&self) -> Option<(&'a str, i32)> {
+        let host = self.server_host.map(str::trim).filter(|h| !h.is_empty())?;
+        let port = self.server_port.and_then(|p| p.trim().parse().ok())?;
+        Some((host, port))
+    }
+
     pub fn to_new_room(
         &self,
         id: RoomId,
@@ -106,6 +118,32 @@ pub fn validate_room_form(room_form: &mut RoomSettingsForm<'_>) -> Result<()> {
         }
     }
     room_form.room_url = room_url;
+
+    let server_host = room_form.server_host.map(str::trim).unwrap_or_default();
+    let server_port = room_form.server_port.map(str::trim).unwrap_or_default();
+    match (server_host.is_empty(), server_port.is_empty()) {
+        (true, true) => {}
+        (false, false) => {
+            if server_host.contains(':') || server_host.contains('/') {
+                return Err(anyhow::anyhow!(
+                    "The server host should be a hostname or IP address, without port or scheme"
+                )
+                .into());
+            }
+            if !matches!(server_port.parse::<i32>(), Ok(1..=65535)) {
+                return Err(anyhow::anyhow!(
+                    "The server port should be a number between 1 and 65535"
+                )
+                .into());
+            }
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "The server host and port should either both be set or both be empty"
+            )
+            .into());
+        }
+    }
 
     if room_form.yaml_limit_per_user && room_form.yaml_limit_per_user_nb <= 0 {
         return Err(
@@ -178,6 +216,8 @@ pub struct RoomSettingsBuilder<'a> {
     ty: RoomSettingsType,
     read_only: bool,
     tpl: Option<RoomTemplateBuilder>,
+    server_host: String,
+    server_port: Option<i32>,
 }
 
 pub struct RoomTemplateBuilder {
@@ -206,7 +246,12 @@ impl<'a> RoomSettingsBuilder<'a> {
         base: TplContext<'a>,
         index: apwm::Index,
         room: Room,
+        room_info: Option<RoomInfo>,
     ) -> RoomSettingsBuilder<'a> {
+        let (server_host, server_port) = match room_info {
+            Some(info) => (info.host, Some(info.port)),
+            None => (String::new(), None),
+        };
         Self {
             base,
             manifest_builder: ManifestFormBuilder::new(index, room.settings.manifest.0.clone()),
@@ -215,6 +260,8 @@ impl<'a> RoomSettingsBuilder<'a> {
             ty: RoomSettingsType::Room,
             read_only: false,
             tpl: None,
+            server_host,
+            server_port,
         }
     }
 
@@ -240,6 +287,8 @@ impl<'a> RoomSettingsBuilder<'a> {
             ty: RoomSettingsType::Room,
             read_only: false,
             tpl: None,
+            server_host: String::new(),
+            server_port: None,
         })
     }
 
@@ -256,6 +305,8 @@ impl<'a> RoomSettingsBuilder<'a> {
             room_id: Some(tpl.id.as_generic_id()),
             ty: RoomSettingsType::Template,
             read_only: false,
+            server_host: String::new(),
+            server_port: None,
         }
     }
 
@@ -280,6 +331,8 @@ impl<'a> RoomSettingsBuilder<'a> {
             ty,
             read_only: false,
             tpl,
+            server_host: String::new(),
+            server_port: None,
         })
     }
 

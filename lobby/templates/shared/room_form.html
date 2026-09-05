@@ -42,6 +42,12 @@
             {% if self.ty.is_room() %}
                 <label for="room_url">Room URL:</label>
                 <input {{ ro }} type="text" id="room_url" name="room.room_url" value="{{self.room.room_url}}" placeholder="https://archipelago.gg/room/<id>">
+
+                <label for="server_host">AP server host:</label>
+                <input {{ ro }} type="text" id="server_host" name="room.server_host" value="{{self.server_host}}" placeholder="archipelago.gg" title="Once set, players see their slot passwords and patches on the room page, and downloaded patches connect to this address">
+
+                <label for="server_port">AP server port:</label>
+                <input {{ ro }} type="number" min=1 max=65535 id="server_port" name="room.server_port" value="{% match self.server_port %}{% when Some with (port) %}{{ port }}{% when None %}{% endmatch %}" placeholder="38281">
             {% else %}
                 <input {{ ro }} type="hidden" id="room_url" name="room.room_url" value="{{self.room.room_url}}">
             {% endif %}

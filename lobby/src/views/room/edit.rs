@@ -92,6 +92,7 @@ pub async fn create_room_submit<'a>(
     }
 
     let new_room = db::create_room(&new_room, &mut conn).await?;
+    db::set_room_info(new_room.id, room_form.room.server_info(), &mut conn).await?;
 
     Ok(Redirect::to(format!("/room/{}", new_room.id)))
 }
@@ -112,6 +113,7 @@ pub async fn edit_room<'a>(
         return Err(anyhow::anyhow!("You're not allowed to edit this room").into());
     }
 
+    let room_info = db::get_room_info(room_id, &mut conn).await?;
     let index = index_manager.index.read().await;
     let base = TplContext::from_session("room", session.0, ctx).await;
 
@@ -120,6 +122,7 @@ pub async fn edit_room<'a>(
             base.clone(),
             index.clone(),
             room.clone(),
+            room_info,
         ),
         room: Some(room),
         base,
@@ -184,6 +187,7 @@ pub async fn edit_room_submit<'a>(
     };
 
     let room = db::update_room(&new_room, &mut conn).await?;
+    db::set_room_info(room_id, room_form.room.server_info(), &mut conn).await?;
     revalidate_yamls_if_necessary(
         &room,
         &old_resolved,
